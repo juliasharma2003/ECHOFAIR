@@ -1,0 +1,5 @@
+{
+  "name": "EchoFair - Music Integrity Platform",
+  "description": "EchoFair is a music industry auditing tool designed to detect payola, nepotism, and unfair promotional patterns in streaming playlists. By connecting your streaming accounts, you can analyze playlist integrity, discover community-vetted music, and ensure a fairer landscape for independent artists.",
+  "requestFramePermissions": []
+}
