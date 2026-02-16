@@ -105,19 +105,6 @@ const App: React.FC = () => {
   const allCommunityPlaylists = useMemo(() => [...COMMUNITY_PLAYLISTS_SEED, ...userCuratedPlaylists], [userCuratedPlaylists]);
   const allAvailablePlaylists = useMemo(() => [...allCommunityPlaylists, ...SPOTIFY_PLAYLISTS], [allCommunityPlaylists]);
 
-  const principalRecommendations = useMemo(() => {
-    let results = [...allCommunityPlaylists];
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase().trim();
-      results = results.filter(p => 
-        p.name.toLowerCase().includes(q) || 
-        p.genre.toLowerCase().includes(q) || 
-        p.description.toLowerCase().includes(q)
-      );
-    }
-    return results.sort((a, b) => (b.integrityScore || 0) - (a.integrityScore || 0)).slice(0, 9);
-  }, [allCommunityPlaylists, searchQuery]);
-
   // Derived voting history for Profile page
   const upvotedTracks = useMemo(() => {
     const list: Track[] = [];
@@ -142,6 +129,62 @@ const App: React.FC = () => {
     });
     return list;
   }, [downvotedTrackIds, allAvailablePlaylists]);
+
+  // SMART RECOMMENDATION LOGIC
+  const principalRecommendations = useMemo(() => {
+    // 1. Calculate Genre Affinity based on upvotes
+    const genreAffinity: Record<string, number> = {};
+    upvotedTracks.forEach(t => {
+      genreAffinity[t.genre] = (genreAffinity[t.genre] || 0) + 1;
+    });
+
+    // 2. Calculate Artist Affinity
+    const followedArtistNames = new Set(followedArtists.map(a => a.name));
+    const upvotedArtistNames = new Set(upvotedTracks.map(t => t.artist));
+
+    let results = allCommunityPlaylists.map(p => {
+      let affinityScore = 0;
+      
+      // Genre Match Boost
+      if (genreAffinity[p.genre]) {
+        affinityScore += genreAffinity[p.genre] * 15; // +15 per upvoted song in genre
+      }
+
+      // Artist Match Boost
+      const hasFollowedArtist = p.tracks.some(t => followedArtistNames.has(t.artist));
+      const hasUpvotedArtist = p.tracks.some(t => upvotedArtistNames.has(t.artist));
+      
+      if (hasFollowedArtist) affinityScore += 25;
+      if (hasUpvotedArtist) affinityScore += 10;
+
+      // Final Ranking Score: Weighted combination of Integrity and User Affinity
+      // We normalize them so that Integrity is still important (base value) but Affinity shifts the order.
+      const finalRank = (p.integrityScore || 0) + affinityScore;
+
+      return { ...p, finalRank, isHighAffinity: affinityScore > 20 };
+    });
+
+    // 3. Apply Search Filter
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase().trim();
+      results = results.filter(p => 
+        p.name.toLowerCase().includes(q) || 
+        p.genre.toLowerCase().includes(q) || 
+        p.description.toLowerCase().includes(q)
+      );
+
+      // Boost search relevance
+      results = results.map(p => {
+        let searchBoost = 0;
+        if (p.genre.toLowerCase() === q) searchBoost += 100;
+        if (p.name.toLowerCase().includes(q)) searchBoost += 50;
+        return { ...p, finalRank: p.finalRank + searchBoost };
+      });
+    }
+
+    // Sort by calculated rank
+    return results.sort((a, b) => b.finalRank - a.finalRank).slice(0, 12);
+  }, [allCommunityPlaylists, searchQuery, upvotedTracks, followedArtists]);
 
   const handleConnect = () => {
     setIsConnected(true);
@@ -269,7 +312,7 @@ const App: React.FC = () => {
       </p>
       <div className="flex flex-col sm:flex-row justify-center gap-4 mb-32">
         <button onClick={handleConnect} className="btn-primary text-sm uppercase py-5 px-14 rounded-2xl flex items-center justify-center gap-3"> Link Spotify </button>
-        <button onClick={() => setCurrentPage(Page.Explore)} className="glass hover:bg-white/5 text-white text-sm font-bold py-5 px-14 rounded-2xl transition-all"> Explore Discovery </button>
+        <button onClick={() => setCurrentPage(Page.Explore)} className="glass hover:bg-white/5 text-white text-sm font-bold py-5 px-14 rounded-2xl transition-all"> View Recommended </button>
       </div>
 
       <div className="grid md:grid-cols-3 gap-6 text-left">
@@ -291,11 +334,11 @@ const App: React.FC = () => {
   const renderExplore = () => (
     <div className="max-w-7xl mx-auto px-6 py-20 animate-in fade-in duration-700">
       <div className="mb-20">
-        <h2 className="text-5xl font-heading font-black mb-10 tracking-tight">Discovery <span className="text-cyan-400">Hub</span></h2>
+        <h2 className="text-5xl font-heading font-black mb-10 tracking-tight">Recommended <span className="text-cyan-400">to you</span></h2>
         <div className="relative group max-w-xl">
           <input 
             type="text" 
-            placeholder="Search genres, artists, or curators..." 
+            placeholder="Search genres (e.g. Jazz), artists, or curators..." 
             className="w-full bg-white/5 border border-white/10 rounded-2xl py-6 px-8 outline-none focus:border-cyan-400/50 transition-all text-lg font-medium placeholder:text-gray-600 shadow-2xl"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
@@ -306,21 +349,36 @@ const App: React.FC = () => {
         </div>
       </div>
       <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {principalRecommendations.map(p => (
+        {principalRecommendations.map((p: any) => (
           <div key={p.id} className="glass rounded-3xl overflow-hidden group cursor-pointer hover:border-cyan-400/20 transition-all shadow-xl" onClick={() => viewPlaylistDetail(p)}>
             <div className="relative aspect-[4/3] w-full overflow-hidden">
               <PlaylistCover playlist={p} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" />
-              <div className="absolute top-4 left-4 bg-black/40 backdrop-blur-md border border-white/10 text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest">
-                {p.integrityScore}% FAIR
+              <div className="absolute top-4 left-4 flex gap-2">
+                <div className="bg-black/40 backdrop-blur-md border border-white/10 text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest text-white">
+                  {p.integrityScore}% FAIR
+                </div>
+                {p.isHighAffinity && (
+                  <div className="bg-cyan-500/80 backdrop-blur-md border border-cyan-400/30 text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest text-black shadow-lg">
+                    BASED ON TASTE
+                  </div>
+                )}
               </div>
             </div>
             <div className="p-8">
               <h3 className="text-2xl font-bold mb-3 font-heading group-hover:text-cyan-400 transition-colors">{p.name}</h3>
               <p className="text-gray-500 text-sm mb-4 line-clamp-2">{p.description}</p>
-              <span className="text-[10px] font-mono font-bold text-gray-600 uppercase tracking-widest">{p.genre}</span>
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] font-mono font-bold text-gray-600 uppercase tracking-widest">{p.genre}</span>
+                <span className="text-[10px] font-mono font-bold text-cyan-400/50 uppercase tracking-widest">Rank: {Math.round(p.finalRank)}</span>
+              </div>
             </div>
           </div>
         ))}
+        {principalRecommendations.length === 0 && (
+          <div className="col-span-full py-20 text-center glass rounded-3xl border-dashed">
+            <p className="text-gray-500 text-xl font-medium">No results found for your search. Try a broader term.</p>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -673,7 +731,7 @@ const App: React.FC = () => {
             <span className="text-2xl font-heading font-black tracking-tight">ECHO<span className="text-cyan-400">FAIR</span></span>
           </div>
           <div className="flex items-center gap-10">
-            <button onClick={() => setCurrentPage(Page.Explore)} className={`text-[10px] font-black uppercase tracking-[0.4em] transition-all hover:text-white ${currentPage === Page.Explore ? 'text-cyan-400 underline underline-offset-8' : 'text-gray-500'}`}>Discovery</button>
+            <button onClick={() => setCurrentPage(Page.Explore)} className={`text-[10px] font-black uppercase tracking-[0.4em] transition-all hover:text-white ${currentPage === Page.Explore ? 'text-cyan-400 underline underline-offset-8' : 'text-gray-500'}`}>Recommended to you</button>
             <button onClick={() => setCurrentPage(Page.Community)} className={`text-[10px] font-black uppercase tracking-[0.4em] transition-all hover:text-white ${currentPage === Page.Community ? 'text-cyan-400 underline underline-offset-8' : 'text-gray-500'}`}>Community</button>
             {isConnected && (<button onClick={() => setCurrentPage(Page.Dashboard)} className={`text-[10px] font-black uppercase tracking-[0.4em] transition-all hover:text-white ${currentPage === Page.Dashboard ? 'text-cyan-400 underline underline-offset-8' : 'text-gray-500'}`}>Analyser</button>)}
             {!isConnected ? (
@@ -775,7 +833,7 @@ const App: React.FC = () => {
               <span className="text-3xl font-heading font-black tracking-tight">ECHOFAIR</span>
             </div>
             <div className="flex gap-10">
-               <button onClick={() => setCurrentPage(Page.Explore)} className="text-[10px] font-black uppercase tracking-widest text-gray-500 hover:text-white transition-colors">Discovery Hub</button>
+               <button onClick={() => setCurrentPage(Page.Explore)} className="text-[10px] font-black uppercase tracking-widest text-gray-500 hover:text-white transition-colors">Recommended</button>
                <button onClick={() => setCurrentPage(Page.Community)} className="text-[10px] font-black uppercase tracking-widest text-gray-500 hover:text-white transition-colors">Community Network</button>
                <button onClick={() => setCurrentPage(Page.Profile)} className="text-[10px] font-black uppercase tracking-widest text-gray-500 hover:text-white transition-colors">Fairness Settings</button>
             </div>
