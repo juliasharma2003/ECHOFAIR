@@ -70,8 +70,8 @@ const COMMUNITY_PLAYLISTS_SEED: Playlist[] = GENRES.flatMap(genre =>
       owner: `${genre}Curator_${i + 1}`,
       imageUrl: finalImageUrl,
       genre: genre,
-      // More realistic distribution: 68 to 98
       integrityScore: 68 + Math.floor(Math.random() * 30),
+      votes: Math.floor(Math.random() * 100),
       tracks: createTracks(genre, genreData[genre].artists, 12)
     };
   })
@@ -90,8 +90,11 @@ const App: React.FC = () => {
   const [selectedArtist, setSelectedArtist] = useState<ArtistFinancials | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   
-  const [upvotedTrackIds, setUpvotedTrackIds] = useState<string[]>([]);
-  const [downvotedTrackIds, setDownvotedTrackIds] = useState<string[]>([]);
+  const [sessionInterests, setSessionInterests] = useState<string[]>([]);
+  
+  const [likedTrackIds, setLikedTrackIds] = useState<string[]>([]);
+  const [upvotedPlaylistIds, setUpvotedPlaylistIds] = useState<string[]>([]);
+  const [downvotedPlaylistIds, setDownvotedPlaylistIds] = useState<string[]>([]);
   const [followedArtists, setFollowedArtists] = useState<{name: string, imageUrl: string}[]>([]);
   const [savedPlaylistIds, setSavedPlaylistIds] = useState<string[]>([]);
   const [userCuratedPlaylists, setUserCuratedPlaylists] = useState<Playlist[]>([]);
@@ -105,86 +108,117 @@ const App: React.FC = () => {
   const allCommunityPlaylists = useMemo(() => [...COMMUNITY_PLAYLISTS_SEED, ...userCuratedPlaylists], [userCuratedPlaylists]);
   const allAvailablePlaylists = useMemo(() => [...allCommunityPlaylists, ...SPOTIFY_PLAYLISTS], [allCommunityPlaylists]);
 
-  // Derived voting history for Profile page
-  const upvotedTracks = useMemo(() => {
+  const favorites = useMemo(() => {
     const list: Track[] = [];
     allAvailablePlaylists.forEach(p => {
       p.tracks.forEach(t => {
-        if (upvotedTrackIds.includes(t.id) && !list.find(item => item.id === t.id)) {
+        if (likedTrackIds.includes(t.id) && !list.find(item => item.id === t.id)) {
           list.push(t);
         }
       });
     });
     return list;
-  }, [upvotedTrackIds, allAvailablePlaylists]);
+  }, [likedTrackIds, allAvailablePlaylists]);
 
-  const downvotedTracks = useMemo(() => {
-    const list: Track[] = [];
-    allAvailablePlaylists.forEach(p => {
-      p.tracks.forEach(t => {
-        if (downvotedTrackIds.includes(t.id) && !list.find(item => item.id === t.id)) {
-          list.push(t);
-        }
-      });
-    });
-    return list;
-  }, [downvotedTrackIds, allAvailablePlaylists]);
-
-  // SMART RECOMMENDATION LOGIC
-  const principalRecommendations = useMemo(() => {
-    // 1. Calculate Genre Affinity based on upvotes
-    const genreAffinity: Record<string, number> = {};
-    upvotedTracks.forEach(t => {
-      genreAffinity[t.genre] = (genreAffinity[t.genre] || 0) + 1;
-    });
-
-    // 2. Calculate Artist Affinity
-    const followedArtistNames = new Set(followedArtists.map(a => a.name));
-    const upvotedArtistNames = new Set(upvotedTracks.map(t => t.artist));
-
-    let results = allCommunityPlaylists.map(p => {
-      let affinityScore = 0;
-      
-      // Genre Match Boost
-      if (genreAffinity[p.genre]) {
-        affinityScore += genreAffinity[p.genre] * 15; // +15 per upvoted song in genre
+  useEffect(() => {
+    const query = searchQuery.toLowerCase().trim();
+    if (query.length > 2) {
+      const matchedGenre = GENRES.find(g => g.toLowerCase() === query || query.includes(g.toLowerCase()));
+      if (matchedGenre && !sessionInterests.includes(matchedGenre)) {
+        setSessionInterests(prev => [...prev, matchedGenre]);
       }
+    }
+  }, [searchQuery]);
 
-      // Artist Match Boost
-      const hasFollowedArtist = p.tracks.some(t => followedArtistNames.has(t.artist));
-      const hasUpvotedArtist = p.tracks.some(t => upvotedArtistNames.has(t.artist));
-      
-      if (hasFollowedArtist) affinityScore += 25;
-      if (hasUpvotedArtist) affinityScore += 10;
-
-      // Final Ranking Score: Weighted combination of Integrity and User Affinity
-      // We normalize them so that Integrity is still important (base value) but Affinity shifts the order.
-      const finalRank = (p.integrityScore || 0) + affinityScore;
-
-      return { ...p, finalRank, isHighAffinity: affinityScore > 20 };
+  // RECOMMENDATION ENGINE
+  const principalRecommendations = useMemo(() => {
+    // 1. Liked Genres
+    const genreAffinityMap: Record<string, number> = {};
+    favorites.forEach(t => {
+      genreAffinityMap[t.genre] = (genreAffinityMap[t.genre] || 0) + 1;
     });
+    const likedGenres = Object.entries(genreAffinityMap)
+      .sort((a, b) => b[1] - a[1])
+      .map(entry => entry[0])
+      .slice(0, 3);
 
-    // 3. Apply Search Filter
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase().trim();
-      results = results.filter(p => 
-        p.name.toLowerCase().includes(q) || 
-        p.genre.toLowerCase().includes(q) || 
-        p.description.toLowerCase().includes(q)
-      );
+    // 2. Active Search
+    const query = searchQuery.toLowerCase().trim();
+    const activeMatchGenre = GENRES.find(g => g.toLowerCase() === query || query.includes(g.toLowerCase()));
 
-      // Boost search relevance
-      results = results.map(p => {
-        let searchBoost = 0;
-        if (p.genre.toLowerCase() === q) searchBoost += 100;
-        if (p.name.toLowerCase().includes(q)) searchBoost += 50;
-        return { ...p, finalRank: p.finalRank + searchBoost };
-      });
+    const seenIds = new Set<string>();
+
+    const getItemsFromGenre = (genre: string, tag: string | null) => {
+      return allCommunityPlaylists
+        .filter(p => p.genre === genre && !seenIds.has(p.id))
+        .sort((a, b) => (b.integrityScore || 0) - (a.integrityScore || 0))
+        .slice(0, 3)
+        .map(p => {
+          seenIds.add(p.id);
+          return { ...p, recommendationTag: tag };
+        });
+    };
+
+    // POOL A: Active Match (Grouped Top) - No tag for MATCH anymore as requested
+    let topGroup: any[] = [];
+    if (activeMatchGenre) {
+      topGroup = getItemsFromGenre(activeMatchGenre, null);
     }
 
-    // Sort by calculated rank
-    return results.sort((a, b) => b.finalRank - a.finalRank).slice(0, 12);
-  }, [allCommunityPlaylists, searchQuery, upvotedTracks, followedArtists]);
+    // POOL B: Personalised Mix (Discovery Feed)
+    let personalisedPool: any[] = [];
+    sessionInterests.forEach(genre => {
+      if (genre !== activeMatchGenre) {
+        personalisedPool = [...personalisedPool, ...getItemsFromGenre(genre, "BASED ON TASTE")];
+      }
+    });
+    likedGenres.forEach(genre => {
+      if (genre !== activeMatchGenre && !sessionInterests.includes(genre)) {
+        personalisedPool = [...personalisedPool, ...getItemsFromGenre(genre, "BASED ON TASTE")];
+      }
+    });
+
+    // SHUFFLE POOL B ONLY: Ensure "BASED ON TASTE" items are mixed up
+    for (let i = personalisedPool.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [personalisedPool[i], personalisedPool[j]] = [personalisedPool[j], personalisedPool[i]];
+    }
+
+    // COMBINE
+    let finalSelection = [...topGroup, ...personalisedPool];
+
+    // POOL C: Fillers (Mixed in after)
+    if (finalSelection.length < 12) {
+      const fillers = allCommunityPlaylists
+        .filter(p => !seenIds.has(p.id))
+        .sort((a, b) => (b.integrityScore || 0) - (a.integrityScore || 0))
+        .slice(0, 12 - finalSelection.length)
+        .map(p => ({ ...p, recommendationTag: null }));
+      
+      finalSelection = [...finalSelection, ...fillers];
+    }
+
+    return finalSelection.slice(0, 12);
+  }, [allCommunityPlaylists, searchQuery, favorites, sessionInterests]);
+
+  const totalArtistLikes = useMemo(() => {
+    if (!selectedArtist) return 0;
+    const artistTracks = new Map<string, Track>();
+    allAvailablePlaylists.forEach(p => {
+      p.tracks.forEach(t => {
+        if (t.artist === selectedArtist.name) {
+          artistTracks.set(t.id, t);
+        }
+      });
+    });
+    
+    let sum = 0;
+    artistTracks.forEach(t => {
+      sum += (t.votes || 0);
+      if (likedTrackIds.includes(t.id)) sum += 1;
+    });
+    return sum;
+  }, [selectedArtist, allAvailablePlaylists, likedTrackIds]);
 
   const handleConnect = () => {
     setIsConnected(true);
@@ -212,21 +246,26 @@ const App: React.FC = () => {
     }
   };
 
-  const handleVote = (track: Track, delta: number) => {
-    if (!isConnected) return alert("Please login to vote!");
+  const handleToggleLike = (trackId: string) => {
+    if (!isConnected) return alert("Please login to like songs!");
+    setLikedTrackIds(prev => prev.includes(trackId) ? prev.filter(id => id !== trackId) : [...prev, trackId]);
+  };
+
+  const handlePlaylistVote = (playlistId: string, delta: number) => {
+    if (!isConnected) return alert("Please login to vote on playlists!");
     if (delta > 0) {
-      if (upvotedTrackIds.includes(track.id)) {
-        setUpvotedTrackIds(prev => prev.filter(id => id !== track.id));
+      if (upvotedPlaylistIds.includes(playlistId)) {
+        setUpvotedPlaylistIds(prev => prev.filter(id => id !== playlistId));
       } else {
-        setUpvotedTrackIds(prev => [...prev, track.id]);
-        setDownvotedTrackIds(prev => prev.filter(id => id !== track.id));
+        setUpvotedPlaylistIds(prev => [...prev, playlistId]);
+        setDownvotedPlaylistIds(prev => prev.filter(id => id !== playlistId));
       }
     } else {
-      if (downvotedTrackIds.includes(track.id)) {
-        setDownvotedTrackIds(prev => prev.filter(id => id !== track.id));
+      if (downvotedPlaylistIds.includes(playlistId)) {
+        setDownvotedPlaylistIds(prev => prev.filter(id => id !== playlistId));
       } else {
-        setDownvotedTrackIds(prev => [...prev, track.id]);
-        setUpvotedTrackIds(prev => prev.filter(id => id !== track.id));
+        setDownvotedPlaylistIds(prev => [...prev, playlistId]);
+        setUpvotedPlaylistIds(prev => prev.filter(id => id !== playlistId));
       }
     }
   };
@@ -243,10 +282,8 @@ const App: React.FC = () => {
   const handleCreatePlaylist = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newPlaylist.name) return alert("Please name your playlist!");
-    
     let finalUrl = `https://images.unsplash.com/photo-${genreImagePools[newPlaylist.genre][0]}?auto=format&fit=crop&q=80&w=800&h=800`;
     if (newPlaylist.genre === "Rap") finalUrl = RAP_MATCHING_IMAGE;
-
     const playlist: Playlist = {
       id: `curated-${Date.now()}`,
       name: newPlaylist.name,
@@ -255,7 +292,8 @@ const App: React.FC = () => {
       imageUrl: finalUrl,
       genre: newPlaylist.genre,
       tracks: createTracks(newPlaylist.genre, genreData[newPlaylist.genre].artists, 10),
-      integrityScore: 100
+      integrityScore: 100,
+      votes: 0
     };
     setUserCuratedPlaylists(prev => [playlist, ...prev]);
     setCurrentPage(Page.Profile);
@@ -265,34 +303,17 @@ const App: React.FC = () => {
   const PlaylistCover = ({ playlist, className = "w-full h-full object-cover" }: { playlist: Playlist, className?: string }) => {
     const [imgState, setImgState] = useState<'loading' | 'loaded' | 'error'>('loading');
     const gradient = genreGradients[playlist.genre] || genreGradients["Various"];
-
-    const displayUrl = useMemo(() => {
-      if (playlist.genre === 'Rap') return RAP_MATCHING_IMAGE;
-      return playlist.imageUrl;
-    }, [playlist.genre, playlist.imageUrl]);
-
+    const displayUrl = useMemo(() => playlist.genre === 'Rap' ? RAP_MATCHING_IMAGE : playlist.imageUrl, [playlist.genre, playlist.imageUrl]);
     useEffect(() => {
-      if (displayUrl.startsWith('data:')) {
-        setImgState('loaded');
-      } else {
-        setImgState('loading');
-      }
+      if (displayUrl.startsWith('data:')) setImgState('loaded');
+      else setImgState('loading');
     }, [playlist.id, displayUrl]);
-
     return (
       <div className={`relative w-full h-full overflow-hidden bg-gradient-to-br ${gradient}`}>
-        <img 
-          src={displayUrl} 
-          className={`${className} transition-opacity duration-700 ${imgState === 'loaded' ? 'opacity-100' : 'opacity-0'}`} 
-          onLoad={() => setImgState('loaded')}
-          onError={() => setImgState('error')} 
-          alt={playlist.name}
-        />
+        <img src={displayUrl} className={`${className} transition-opacity duration-700 ${imgState === 'loaded' ? 'opacity-100' : 'opacity-0'}`} onLoad={() => setImgState('loaded')} onError={() => setImgState('error')} alt={playlist.name} />
         {imgState !== 'loaded' && (
           <div className="absolute inset-0 flex items-center justify-center p-4 text-center bg-black/10 backdrop-blur-sm">
-            <span className="text-white/50 font-black text-xl uppercase tracking-tighter animate-pulse">
-              {imgState === 'loading' ? 'SIGNAL' : playlist.genre}
-            </span>
+            <span className="text-white/50 font-black text-xl uppercase tracking-tighter animate-pulse">{imgState === 'loading' ? 'SIGNAL' : playlist.genre}</span>
           </div>
         )}
       </div>
@@ -301,20 +322,18 @@ const App: React.FC = () => {
 
   const renderLanding = () => (
     <div className="max-w-7xl mx-auto px-6 pt-32 pb-20 text-center animate-in fade-in zoom-in-95 duration-1000">
-      <div className="inline-block px-4 py-1.5 rounded-full border border-white/10 bg-white/5 text-[10px] font-black uppercase tracking-[0.3em] text-cyan-400 mb-8">
-        Music Fairness Initiative
-      </div>
-      <h1 className="text-6xl md:text-9xl font-extrabold font-heading mb-8 tracking-tight leading-[0.9]">
-        RECLAIM THE <br/><span className="gradient-text">ALGORITHM.</span>
-      </h1>
-      <p className="text-xl text-gray-400 mb-16 max-w-2xl mx-auto leading-relaxed font-medium">
-        EchoFair inspects your streaming habits to expose corporate bias and promote organic artist growth. Transparency for the next era of audio.
-      </p>
+      <div className="inline-block px-4 py-1.5 rounded-full border border-white/10 bg-white/5 text-[10px] font-black uppercase tracking-[0.3em] text-cyan-400 mb-8">Music Fairness Initiative</div>
+      <h1 className="text-6xl md:text-9xl font-extrabold font-heading mb-8 tracking-tight leading-[0.9]">RECLAIM THE <br/><span className="gradient-text">ALGORITHM.</span></h1>
+      <p className="text-xl text-gray-400 mb-16 max-w-2xl mx-auto leading-relaxed font-medium">EchoFair inspects your streaming habits to expose corporate bias and promote organic artist growth. Transparency for the next era of audio.</p>
       <div className="flex flex-col sm:flex-row justify-center gap-4 mb-32">
-        <button onClick={handleConnect} className="btn-primary text-sm uppercase py-5 px-14 rounded-2xl flex items-center justify-center gap-3"> Link Spotify </button>
+        <button 
+          onClick={isConnected ? () => setCurrentPage(Page.Dashboard) : handleConnect} 
+          className="btn-primary text-sm uppercase py-5 px-14 rounded-2xl flex items-center justify-center gap-3"
+        > 
+          {isConnected ? "Analyse my playlists" : "Link Spotify"} 
+        </button>
         <button onClick={() => setCurrentPage(Page.Explore)} className="glass hover:bg-white/5 text-white text-sm font-bold py-5 px-14 rounded-2xl transition-all"> View Recommended </button>
       </div>
-
       <div className="grid md:grid-cols-3 gap-6 text-left">
         {[
           { title: "Fairness Inspection", icon: "01", desc: "Easily check if a playlist is filled with genuine music or just hidden corporate advertisements." },
@@ -336,13 +355,7 @@ const App: React.FC = () => {
       <div className="mb-20">
         <h2 className="text-5xl font-heading font-black mb-10 tracking-tight">Recommended <span className="text-cyan-400">to you</span></h2>
         <div className="relative group max-w-xl">
-          <input 
-            type="text" 
-            placeholder="Search genres (e.g. Jazz), artists, or curators..." 
-            className="w-full bg-white/5 border border-white/10 rounded-2xl py-6 px-8 outline-none focus:border-cyan-400/50 transition-all text-lg font-medium placeholder:text-gray-600 shadow-2xl"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
+          <input type="text" placeholder="Search genres (e.g. Jazz), artists, or curators..." className="w-full bg-white/5 border border-white/10 rounded-2xl py-6 px-8 outline-none focus:border-cyan-400/50 transition-all text-lg font-medium placeholder:text-gray-600 shadow-2xl" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
           <div className="absolute right-4 top-4 bg-white text-black p-3 rounded-xl shadow-lg">
              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
           </div>
@@ -353,13 +366,13 @@ const App: React.FC = () => {
           <div key={p.id} className="glass rounded-3xl overflow-hidden group cursor-pointer hover:border-cyan-400/20 transition-all shadow-xl" onClick={() => viewPlaylistDetail(p)}>
             <div className="relative aspect-[4/3] w-full overflow-hidden">
               <PlaylistCover playlist={p} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" />
-              <div className="absolute top-4 left-4 flex gap-2">
-                <div className="bg-black/40 backdrop-blur-md border border-white/10 text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest text-white">
-                  {p.integrityScore}% FAIR
-                </div>
-                {p.isHighAffinity && (
-                  <div className="bg-cyan-500/80 backdrop-blur-md border border-cyan-400/30 text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest text-black shadow-lg">
-                    BASED ON TASTE
+              <div className="absolute top-4 left-4 flex flex-col gap-2">
+                <div className="bg-black/40 backdrop-blur-md border border-white/10 text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest text-white">{p.integrityScore}% FAIR</div>
+                {p.recommendationTag && (
+                  <div className={`backdrop-blur-md border text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest shadow-lg animate-in zoom-in-90 ${
+                    p.recommendationTag === "MATCH" ? "bg-white text-black border-white/30" : "bg-cyan-500/90 text-black border-cyan-400/30"
+                  }`}>
+                    {p.recommendationTag}
                   </div>
                 )}
               </div>
@@ -369,23 +382,18 @@ const App: React.FC = () => {
               <p className="text-gray-500 text-sm mb-4 line-clamp-2">{p.description}</p>
               <div className="flex justify-between items-center">
                 <span className="text-[10px] font-mono font-bold text-gray-600 uppercase tracking-widest">{p.genre}</span>
-                <span className="text-[10px] font-mono font-bold text-cyan-400/50 uppercase tracking-widest">Rank: {Math.round(p.finalRank)}</span>
               </div>
             </div>
           </div>
         ))}
-        {principalRecommendations.length === 0 && (
-          <div className="col-span-full py-20 text-center glass rounded-3xl border-dashed">
-            <p className="text-gray-500 text-xl font-medium">No results found for your search. Try a broader term.</p>
-          </div>
-        )}
       </div>
     </div>
   );
 
   const renderDashboard = () => (
     <div className="max-w-7xl mx-auto px-6 py-20 animate-in fade-in duration-700">
-      <h2 className="text-5xl font-heading font-black tracking-tight mb-16">Fairness <span className="text-cyan-400">Analyser</span></h2>
+      <h2 className="text-5xl font-heading font-black tracking-tight mb-4">Fairness <span className="text-cyan-400">Analyser</span></h2>
+      <p className="text-gray-400 text-2xl mb-16 font-bold tracking-tight">From your Spotify</p>
       <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
         {SPOTIFY_PLAYLISTS.map(playlist => (
           <div key={playlist.id} className="glass rounded-3xl overflow-hidden group border border-white/5 hover:border-cyan-400/30 transition-all cursor-pointer shadow-xl" onClick={() => viewPlaylistDetail(playlist)}>
@@ -396,9 +404,7 @@ const App: React.FC = () => {
               </div>
             </div>
             <div className="p-10">
-              <button onClick={(e) => { e.stopPropagation(); startAnalysis(playlist); }} className="w-full bg-white text-black font-black py-4 rounded-xl text-xs uppercase tracking-widest hover:scale-105 transition-transform shadow-lg">
-                Inspect Fairness
-              </button>
+              <button onClick={(e) => { e.stopPropagation(); startAnalysis(playlist); }} className="w-full bg-white text-black font-black py-4 rounded-xl text-xs uppercase tracking-widest hover:scale-105 transition-transform shadow-lg">Inspect Fairness</button>
             </div>
           </div>
         ))}
@@ -434,32 +440,23 @@ const App: React.FC = () => {
         <div className="w-48 h-48 rounded-[2.5rem] bg-gradient-to-tr from-cyan-400 to-purple-600 flex items-center justify-center text-5xl font-black text-black shadow-2xl">JD</div>
         <div className="flex-1 text-center md:text-left">
           <h2 className="text-6xl font-heading font-black mb-4 tracking-tight">John Doe</h2>
-          <p className="text-gray-400 text-lg mb-8 max-w-lg font-medium">Independent analyst exposing payola patterns and corporate signals.</p>
-          <div className="flex gap-4">
-            <button onClick={() => setCurrentPage(Page.CreatePlaylist)} className="btn-primary px-10 py-4 rounded-xl text-[10px] uppercase tracking-widest shadow-xl">
-              Create a playlist
-            </button>
-            <button onClick={() => setIsConnected(false)} className="glass px-10 py-4 rounded-xl text-[10px] uppercase font-black text-red-400 tracking-widest hover:bg-red-400/10 transition-colors">
-              Disconnect
-            </button>
+          <p className="text-gray-400 text-lg mb-8 max-w-lg font-medium">Just a fan of music.</p>
+          <div className="flex gap-4 justify-center md:justify-start">
+            <button onClick={() => setCurrentPage(Page.CreatePlaylist)} className="btn-primary px-10 py-4 rounded-xl text-[10px] uppercase tracking-widest shadow-xl">Create a playlist</button>
+            <button onClick={() => setIsConnected(false)} className="glass px-10 py-4 rounded-xl text-[10px] uppercase font-black text-red-400 tracking-widest hover:bg-red-400/10 transition-colors">Disconnect</button>
           </div>
         </div>
       </div>
-
       <div className="space-y-16">
         <section className="glass p-10 rounded-4xl border border-white/5 shadow-2xl">
           <h3 className="text-2xl font-heading font-black mb-8 border-l-4 border-cyan-400 pl-6">Your Playlists</h3>
           <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
             {userCuratedPlaylists.length === 0 ? (
-              <div className="col-span-full py-10 text-center border border-dashed border-white/10 rounded-3xl">
-                <p className="text-gray-600 italic">Start curating fair signals to see them here.</p>
-              </div>
+              <div className="col-span-full py-10 text-center border border-dashed border-white/10 rounded-3xl"><p className="text-gray-600 italic">Start curating fair signals to see them here.</p></div>
             ) : (
               userCuratedPlaylists.map(p => (
                 <div key={p.id} className="group cursor-pointer" onClick={() => viewPlaylistDetail(p)}>
-                  <div className="aspect-square rounded-2xl overflow-hidden mb-4 shadow-lg border border-white/10 bg-black/10">
-                    <PlaylistCover playlist={p} className="w-full h-full object-cover group-hover:scale-105 transition-transform" />
-                  </div>
+                  <div className="aspect-square rounded-2xl overflow-hidden mb-4 shadow-lg border border-white/10 bg-black/10"><PlaylistCover playlist={p} className="w-full h-full object-cover group-hover:scale-105 transition-transform" /></div>
                   <h4 className="font-bold text-center group-hover:text-cyan-400 truncate">{p.name}</h4>
                   <div className="text-[9px] text-gray-500 text-center font-black uppercase mt-1 tracking-widest">{p.genre}</div>
                 </div>
@@ -467,69 +464,23 @@ const App: React.FC = () => {
             )}
           </div>
         </section>
-
+        
         <div className="grid lg:grid-cols-2 gap-12">
-          {/* UPVOTED TRACKS SECTION */}
+          {/* FAVORITES SECTION (Songs Liked) */}
           <section className="glass p-10 rounded-4xl border border-white/5 shadow-2xl">
-            <h3 className="text-2xl font-heading font-black mb-8 border-l-4 border-cyan-400 pl-6 text-cyan-400">Upvoted Songs</h3>
+            <h3 className="text-2xl font-heading font-black mb-8 border-l-4 border-cyan-400 pl-6 text-cyan-400">Favorites</h3>
             <div className="space-y-4 max-h-96 overflow-y-auto pr-2 custom-scrollbar">
-              {upvotedTracks.length === 0 && <p className="text-gray-600 italic">No upvoted songs yet.</p>}
-              {upvotedTracks.map(t => (
+              {favorites.length === 0 && <p className="text-gray-600 italic">No favorite songs yet.</p>}
+              {favorites.map(t => (
                 <div key={t.id} className="flex items-center justify-between bg-white/[0.03] p-4 rounded-2xl border border-white/5 group hover:bg-white/[0.05] transition-colors">
-                  <div>
-                    <div className="font-bold text-lg">{t.title}</div>
-                    <div className="text-[10px] text-gray-500 font-black uppercase tracking-widest">@{t.artist}</div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-mono font-black text-cyan-400">{(t.votes || 0) + 1}</span>
-                    <svg className="w-4 h-4 text-cyan-400" fill="currentColor" viewBox="0 0 20 20"><path d="M14.707 12.707a1 1 0 01-1.414 0L10 9.414l-3.293 3.293a1 1 0 01-1.414-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 010 1.414z"/></svg>
-                  </div>
+                  <div><div className="font-bold text-lg">{t.title}</div><div className="text-[10px] text-gray-500 font-black uppercase tracking-widest">@{t.artist}</div></div>
+                  <svg className="w-5 h-5 text-red-500 fill-current" viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
                 </div>
               ))}
             </div>
           </section>
 
-          {/* DOWNVOTED TRACKS SECTION */}
-          <section className="glass p-10 rounded-4xl border border-white/5 shadow-2xl">
-            <h3 className="text-2xl font-heading font-black mb-8 border-l-4 border-red-500 pl-6 text-red-500">Downvoted Songs</h3>
-            <div className="space-y-4 max-h-96 overflow-y-auto pr-2 custom-scrollbar">
-              {downvotedTracks.length === 0 && <p className="text-gray-600 italic">No downvoted songs yet.</p>}
-              {downvotedTracks.map(t => (
-                <div key={t.id} className="flex items-center justify-between bg-white/[0.03] p-4 rounded-2xl border border-white/5 group hover:bg-white/[0.05] transition-colors opacity-80">
-                  <div>
-                    <div className="font-bold text-lg">{t.title}</div>
-                    <div className="text-[10px] text-gray-500 font-black uppercase tracking-widest">@{t.artist}</div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-mono font-black text-red-500">{(t.votes || 0) - 1}</span>
-                    <svg className="w-4 h-4 text-red-500" fill="currentColor" viewBox="0 0 20 20"><path d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"/></svg>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section className="glass p-10 rounded-4xl border border-white/5 shadow-2xl">
-            <h3 className="text-2xl font-heading font-black mb-8 border-l-4 border-purple-400 pl-6">Library</h3>
-            <div className="space-y-4">
-              {savedPlaylistIds.length === 0 && <p className="text-gray-600 italic">No nodes added yet.</p>}
-              {savedPlaylistIds.map(id => {
-                const p = allAvailablePlaylists.find(cp => cp.id === id);
-                return p ? (
-                  <div key={id} className="flex items-center gap-6 bg-white/[0.03] p-4 rounded-2xl cursor-pointer hover:bg-white/[0.06] transition-all border border-white/5" onClick={() => viewPlaylistDetail(p)}>
-                    <div className="w-16 h-16 rounded-xl overflow-hidden shrink-0 shadow-lg border border-white/10 bg-black/10">
-                      <PlaylistCover playlist={p} className="w-full h-full object-cover" />
-                    </div>
-                    <div>
-                      <span className="font-bold text-lg">{p.name}</span>
-                      <div className="text-[9px] text-cyan-400 font-bold uppercase mt-1 tracking-widest">{p.genre} Signal</div>
-                    </div>
-                  </div>
-                ) : null;
-              })}
-            </div>
-          </section>
-
+          {/* ARTISTS SUPPORTING SECTION (Following) */}
           <section className="glass p-10 rounded-4xl border border-white/5 shadow-2xl">
             <h3 className="text-2xl font-heading font-black mb-8 border-l-4 border-indigo-400 pl-6">Artists Supporting</h3>
             <div className="space-y-4">
@@ -542,6 +493,22 @@ const App: React.FC = () => {
               ))}
             </div>
           </section>
+
+          <section className="glass p-10 rounded-4xl border border-white/5 shadow-2xl col-span-full">
+            <h3 className="text-2xl font-heading font-black mb-8 border-l-4 border-purple-400 pl-6">Library</h3>
+            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {savedPlaylistIds.length === 0 && <p className="text-gray-600 italic col-span-full">No nodes added yet.</p>}
+              {savedPlaylistIds.map(id => {
+                const p = allAvailablePlaylists.find(cp => cp.id === id);
+                return p ? (
+                  <div key={id} className="flex items-center gap-6 bg-white/[0.03] p-4 rounded-2xl cursor-pointer hover:bg-white/[0.06] transition-all border border-white/5" onClick={() => viewPlaylistDetail(p)}>
+                    <div className="w-16 h-16 rounded-xl overflow-hidden shrink-0 shadow-lg border border-white/10 bg-black/10"><PlaylistCover playlist={p} className="w-full h-full object-cover" /></div>
+                    <div><span className="font-bold text-lg">{p.name}</span><div className="text-[9px] text-cyan-400 font-bold uppercase mt-1 tracking-widest">{p.genre} Signal</div></div>
+                  </div>
+                ) : null;
+              })}
+            </div>
+          </section>
         </div>
       </div>
     </div>
@@ -552,40 +519,10 @@ const App: React.FC = () => {
       <h2 className="text-5xl font-heading font-black mb-4 tracking-tight">Create a playlist</h2>
       <p className="text-gray-500 mb-12 font-medium">Initialize a community node for fair discovery.</p>
       <form onSubmit={handleCreatePlaylist} className="glass p-10 rounded-4xl space-y-8 shadow-2xl">
-        <div className="space-y-2">
-          <label className="text-[10px] font-black uppercase tracking-widest text-gray-500 ml-1">Playlist Name</label>
-          <input 
-            type="text" 
-            placeholder="Independent Sound 2025" 
-            className="w-full bg-white/5 border border-white/10 rounded-xl py-4 px-6 outline-none focus:border-cyan-400 font-bold transition-all shadow-inner"
-            value={newPlaylist.name}
-            onChange={(e) => setNewPlaylist(prev => ({ ...prev, name: e.target.value }))}
-          />
-        </div>
-        <div className="space-y-2">
-          <label className="text-[10px] font-black uppercase tracking-widest text-gray-500 ml-1">Curator Vision</label>
-          <textarea 
-            placeholder="Focus on independent growth, anti-loop patterns..." 
-            rows={3}
-            className="w-full bg-white/5 border border-white/10 rounded-xl py-4 px-6 outline-none focus:border-cyan-400 font-medium transition-all shadow-inner"
-            value={newPlaylist.description}
-            onChange={(e) => setNewPlaylist(prev => ({ ...prev, description: e.target.value }))}
-          />
-        </div>
-        <div className="space-y-2">
-          <label className="text-[10px] font-black uppercase tracking-widest text-gray-500 ml-1">Genre Target</label>
-          <select 
-            className="w-full bg-white/5 border border-white/10 rounded-xl py-4 px-6 outline-none focus:border-cyan-400 font-bold bg-black cursor-pointer transition-all"
-            value={newPlaylist.genre}
-            onChange={(e) => setNewPlaylist(prev => ({ ...prev, genre: e.target.value }))}
-          >
-            {GENRES.map(g => <option key={g} value={g}>{g}</option>)}
-          </select>
-        </div>
-        <div className="flex gap-4 pt-4">
-           <button type="button" onClick={() => setCurrentPage(Page.Profile)} className="flex-1 glass py-4 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-white/5">Cancel</button>
-           <button type="submit" className="flex-[2] btn-primary py-4 rounded-xl text-xs uppercase tracking-widest shadow-lg">Create playlist</button>
-        </div>
+        <div className="space-y-2"><label className="text-[10px] font-black uppercase tracking-widest text-gray-500 ml-1">Playlist Name</label><input type="text" placeholder="Independent Sound 2025" className="w-full bg-white/5 border border-white/10 rounded-xl py-4 px-6 outline-none focus:border-cyan-400 font-bold transition-all shadow-inner" value={newPlaylist.name} onChange={(e) => setNewPlaylist(prev => ({ ...prev, name: e.target.value }))} /></div>
+        <div className="space-y-2"><label className="text-[10px] font-black uppercase tracking-widest text-gray-500 ml-1">Curator Vision</label><textarea placeholder="Focus on independent growth, anti-loop patterns..." rows={3} className="w-full bg-white/5 border border-white/10 rounded-xl py-4 px-6 outline-none focus:border-cyan-400 font-medium transition-all shadow-inner" value={newPlaylist.description} onChange={(e) => setNewPlaylist(prev => ({ ...prev, description: e.target.value }))} /></div>
+        <div className="space-y-2"><label className="text-[10px] font-black uppercase tracking-widest text-gray-500 ml-1">Genre Target</label><select className="w-full bg-white/5 border border-white/10 rounded-xl py-4 px-6 outline-none focus:border-cyan-400 font-bold bg-black cursor-pointer transition-all" value={newPlaylist.genre} onChange={(e) => setNewPlaylist(prev => ({ ...prev, genre: e.target.value }))}>{GENRES.map(g => <option key={g} value={g}>{g}</option>)}</select></div>
+        <div className="flex gap-4 pt-4"><button type="button" onClick={() => setCurrentPage(Page.Profile)} className="flex-1 glass py-4 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-white/5">Cancel</button><button type="submit" className="flex-[2] btn-primary py-4 rounded-xl text-xs uppercase tracking-widest shadow-lg">Create playlist</button></div>
       </form>
     </div>
   );
@@ -593,81 +530,48 @@ const App: React.FC = () => {
   const renderPlaylistDetail = () => {
     if (!selectedPlaylist) return null;
     const isSpotifyPlaylist = selectedPlaylist.id.startsWith('s-');
+    const upvoted = upvotedPlaylistIds.includes(selectedPlaylist.id);
+    const downvoted = downvotedPlaylistIds.includes(selectedPlaylist.id);
+    const totalVotes = (selectedPlaylist.votes || 0) + (upvoted ? 1 : downvoted ? -1 : 0);
+
     return (
       <div className="max-w-6xl mx-auto px-6 py-24 animate-in fade-in duration-500">
         <button onClick={() => setCurrentPage(Page.Explore)} className="text-gray-600 hover:text-white mb-12 flex items-center gap-3 group transition-colors font-bold">
-          <svg className="w-5 h-5 group-hover:-translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
-          Back
+          <svg className="w-5 h-5 group-hover:-translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>Back
         </button>
         <div className="flex flex-col lg:flex-row gap-16 mb-24 items-start">
-          <div className="w-full lg:w-96 aspect-square rounded-4xl overflow-hidden shadow-2xl border border-white/5 bg-black/10">
-            <PlaylistCover playlist={selectedPlaylist} className="w-full h-full object-cover" />
-          </div>
+          <div className="w-full lg:w-96 aspect-square rounded-4xl overflow-hidden shadow-2xl border border-white/5 bg-black/10"><PlaylistCover playlist={selectedPlaylist} className="w-full h-full object-cover" /></div>
           <div className="flex-1">
-            <div className="flex items-center gap-3 mb-6">
-               <span className="bg-white/5 text-cyan-400 px-3 py-1 rounded-full text-[10px] font-black uppercase border border-cyan-400/20">{selectedPlaylist.genre}</span>
-               <span className="text-[10px] font-black uppercase text-gray-600 tracking-widest">By @{selectedPlaylist.owner}</span>
-            </div>
+            <div className="flex items-center gap-3 mb-6"><span className="bg-white/5 text-cyan-400 px-3 py-1 rounded-full text-[10px] font-black uppercase border border-cyan-400/20">{selectedPlaylist.genre}</span><span className="text-[10px] font-black uppercase text-gray-600 tracking-widest">By @{selectedPlaylist.owner}</span></div>
             <h1 className="text-6xl md:text-8xl font-heading font-black mb-8 tracking-tighter leading-none">{selectedPlaylist.name}</h1>
             <p className="text-gray-400 text-xl mb-12 max-w-2xl leading-relaxed font-medium">{selectedPlaylist.description}</p>
-            <div className="flex flex-wrap gap-4">
-              {isSpotifyPlaylist && (
-                <button onClick={() => startAnalysis(selectedPlaylist)} className="btn-primary py-4 px-12 rounded-xl text-[10px] uppercase tracking-widest shadow-xl">Inspect Fairness</button>
-              )}
-              <button onClick={() => toggleSavePlaylist(selectedPlaylist.id)} className={`px-10 py-4 rounded-xl text-[10px] uppercase tracking-widest font-black transition-all ${savedPlaylistIds.includes(selectedPlaylist.id) ? 'bg-cyan-500 text-black shadow-cyan' : 'glass shadow-lg'}`}>
-                {savedPlaylistIds.includes(selectedPlaylist.id) ? 'In Library' : 'Add to Library'}
-              </button>
+            <div className="flex flex-wrap items-center gap-6">
+              {isSpotifyPlaylist && <button onClick={() => startAnalysis(selectedPlaylist)} className="btn-primary py-4 px-12 rounded-xl text-[10px] uppercase tracking-widest shadow-xl">Inspect Fairness</button>}
+              <button onClick={() => toggleSavePlaylist(selectedPlaylist.id)} className={`px-10 py-4 rounded-xl text-[10px] uppercase tracking-widest font-black transition-all ${savedPlaylistIds.includes(selectedPlaylist.id) ? 'bg-cyan-500 text-black shadow-cyan' : 'glass shadow-lg'}`}>{savedPlaylistIds.includes(selectedPlaylist.id) ? 'In Library' : 'Add to Library'}</button>
+              
+              <div className="flex items-center gap-3 glass p-2 rounded-2xl">
+                 <button onClick={() => handlePlaylistVote(selectedPlaylist.id, 1)} className={`p-2 rounded-xl transition-colors ${upvoted ? 'bg-cyan-400 text-black' : 'hover:bg-white/5 text-gray-500'}`}><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 15l7-7 7 7"/></svg></button>
+                 <span className="font-mono font-black text-lg min-w-[1.5rem] text-center">{totalVotes}</span>
+                 <button onClick={() => handlePlaylistVote(selectedPlaylist.id, -1)} className={`p-2 rounded-xl transition-colors ${downvoted ? 'bg-red-500 text-black' : 'hover:bg-white/5 text-gray-500'}`}><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M19 9l-7 7-7-7"/></svg></button>
+              </div>
             </div>
           </div>
         </div>
         <div className="glass rounded-4xl overflow-hidden border border-white/5 shadow-2xl">
-          <div className="px-12 py-6 border-b border-white/5 bg-white/[0.02] flex justify-between text-[10px] font-black text-gray-600 uppercase tracking-widest">
-            <span className="w-1/2">Audio Signal</span>
-            <span className="w-1/4">Entity Type</span>
-            <span className="w-1/4 text-right">Vote Index</span>
-          </div>
+          <div className="px-12 py-6 border-b border-white/5 bg-white/[0.02] flex justify-between text-[10px] font-black text-gray-600 uppercase tracking-widest"><span className="w-1/2">Audio Signal</span><span className="w-1/4">Entity Type</span><span className="w-1/4 text-right">Interaction</span></div>
           <div className="divide-y divide-white/5">
-            {selectedPlaylist.tracks.map((track, i) => {
-              const isUpvoted = upvotedTrackIds.includes(track.id);
-              const isDownvoted = downvotedTrackIds.includes(track.id);
-              const totalVotes = (track.votes || 0) + (isUpvoted ? 1 : isDownvoted ? -1 : 0);
-
-              return (
-                <div key={track.id} className="px-12 py-8 flex items-center hover:bg-white/[0.02] transition-colors group">
-                  <div className="w-1/2 flex items-center gap-8">
-                    <span className="text-gray-700 font-mono text-xs font-bold">{i + 1}</span>
-                    <div>
-                      <div className="font-bold text-lg group-hover:text-cyan-400 transition-colors">{track.title}</div>
-                      <button onClick={() => {
-                        setIsLoadingArtist(true);
-                        setCurrentPage(Page.ArtistProfile);
-                        estimateArtistFinancials(track.artist, track.label).then(res => {
-                          setSelectedArtist(res);
-                          setIsLoadingArtist(false);
-                        });
-                      }} className="text-xs text-gray-500 hover:text-white transition-colors mt-1 font-bold">@{track.artist}</button>
-                    </div>
-                  </div>
-                  <div className="w-1/4">
-                     <span className={`text-[10px] font-black uppercase px-3 py-1 rounded-lg ${track.label === 'Independent' ? 'bg-cyan-400/10 text-cyan-400 border border-cyan-400/20' : 'bg-white/5 text-gray-600'}`}>
-                        {track.label}
-                     </span>
-                  </div>
-                  <div className="w-1/4 flex justify-end gap-6 items-center">
-                    <div className="flex items-center gap-4 bg-white/[0.02] p-2 rounded-2xl border border-white/5">
-                      <div className="flex gap-1">
-                        <button onClick={() => handleVote(track, 1)} className={`p-2 glass rounded-lg transition-colors ${isUpvoted ? 'text-cyan-400 bg-cyan-400/10' : 'hover:text-cyan-400'} shadow-sm`}><svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M14.707 12.707a1 1 0 01-1.414 0L10 9.414l-3.293 3.293a1 1 0 01-1.414-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 010 1.414z"/></svg></button>
-                        <button onClick={() => handleVote(track, -1)} className={`p-2 glass rounded-lg transition-colors ${isDownvoted ? 'text-red-400 bg-red-400/10' : 'hover:text-red-400'} shadow-sm`}><svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"/></svg></button>
-                      </div>
-                      <span className={`text-xs font-mono font-black ${isUpvoted ? 'text-cyan-400' : isDownvoted ? 'text-red-400' : 'text-gray-500'}`}>{totalVotes}</span>
-                    </div>
-                    <a href={track.spotifyUrl} target="_blank" rel="noopener noreferrer" className="p-4 glass rounded-xl inline-block hover:bg-cyan-400 hover:text-black transition-all hover:scale-105 shadow-md">
-                      <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.508 17.302c-.218.358-.682.474-1.037.258-2.856-1.745-6.452-2.14-10.686-1.173-.41.094-.82-.164-.914-.572-.094-.41.164-.82.572-.914 4.636-1.06 8.608-.61 11.799 1.339.358.218.474.682.266 1.042z"/></svg>
-                    </a>
-                  </div>
+            {selectedPlaylist.tracks.map((track, i) => (
+              <div key={track.id} className="px-12 py-8 flex items-center hover:bg-white/[0.02] transition-colors group">
+                <div className="w-1/2 flex items-center gap-8"><span className="text-gray-700 font-mono text-xs font-bold">{i + 1}</span><div><div className="font-bold text-lg group-hover:text-cyan-400 transition-colors">{track.title}</div><button onClick={() => { setIsLoadingArtist(true); setCurrentPage(Page.ArtistProfile); estimateArtistFinancials(track.artist, track.label).then(res => { setSelectedArtist(res); setIsLoadingArtist(false); }); }} className="text-xs text-gray-500 hover:text-white transition-colors mt-1 font-bold">@{track.artist}</button></div></div>
+                <div className="w-1/4"><span className={`text-[10px] font-black uppercase px-3 py-1 rounded-lg ${track.label === 'Independent' ? 'bg-cyan-400/10 text-cyan-400 border border-cyan-400/20' : 'bg-white/5 text-gray-600'}`}>{track.label}</span></div>
+                <div className="w-1/4 flex justify-end gap-6 items-center">
+                  <button onClick={() => handleToggleLike(track.id)} className={`p-4 glass rounded-xl transition-all hover:scale-110 ${likedTrackIds.includes(track.id) ? 'text-red-500 shadow-red-500/20' : 'text-gray-600 hover:text-red-400'}`}>
+                    <svg className={`w-5 h-5 ${likedTrackIds.includes(track.id) ? 'fill-current' : 'fill-none'}`} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
+                  </button>
+                  <a href={track.spotifyUrl} target="_blank" rel="noopener noreferrer" className="p-4 glass rounded-xl inline-block hover:bg-cyan-400 hover:text-black transition-all hover:scale-105 shadow-md"><svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.508 17.302c-.218.358-.682.474-1.037.258-2.856-1.745-6.452-2.14-10.686-1.173-.41.094-.82-.164-.914-.572-.094-.41.164-.82.572-.914 4.636-1.06 8.608-.61 11.799 1.339.358.218.474.682.266 1.042z"/></svg></a>
                 </div>
-              );
-            })}
+              </div>
+            ))}
           </div>
         </div>
       </div>
@@ -676,26 +580,34 @@ const App: React.FC = () => {
 
   const renderArtistProfile = () => (
     <div className="max-w-6xl mx-auto px-6 py-24 animate-in fade-in duration-500">
-      <button onClick={() => setCurrentPage(Page.Explore)} className="text-gray-600 hover:text-white mb-12 flex items-center gap-3 transition-colors font-bold">
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
-        Return
-      </button>
+      <button onClick={() => setCurrentPage(Page.Explore)} className="text-gray-600 hover:text-white mb-12 flex items-center gap-3 transition-colors font-bold"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>Return</button>
       {isLoadingArtist ? (
-        <div className="py-40 text-center space-y-10">
-           <div className="w-20 h-20 border-t-2 border-cyan-400 rounded-full animate-spin mx-auto shadow-cyan"></div>
-           <h2 className="text-4xl font-heading font-black tracking-tight">Decoding Artist Economy...</h2>
-        </div>
+        <div className="py-40 text-center space-y-10"><div className="w-20 h-20 border-t-2 border-cyan-400 rounded-full animate-spin mx-auto shadow-cyan"></div><h2 className="text-4xl font-heading font-black tracking-tight">Decoding Artist Economy...</h2></div>
       ) : selectedArtist && (
         <div className="space-y-16 animate-in fade-in duration-500">
           <div className="flex flex-col md:flex-row gap-16 items-center md:items-start">
             <div className="w-56 h-56 rounded-4xl bg-gradient-to-br from-cyan-400 to-indigo-500 flex items-center justify-center text-7xl font-black text-black shadow-2xl">{selectedArtist.name.substring(0, 1).toUpperCase()}</div>
             <div className="flex-1 text-center md:text-left">
               <h2 className="text-7xl font-heading font-black mb-6 tracking-tight">{selectedArtist.name}</h2>
-              <button onClick={() => toggleFollowArtist(selectedArtist.name)} className={`px-10 py-4 rounded-xl text-[10px] uppercase font-black transition-all ${followedArtists.find(a => a.name === selectedArtist.name) ? 'bg-cyan-400 text-black shadow-cyan' : 'glass shadow-lg'}`}>
-                {followedArtists.find(a => a.name === selectedArtist.name) ? 'Following' : 'Follow Artist'}
-              </button>
+              <div className="flex items-center gap-6 justify-center md:justify-start">
+                <button onClick={() => toggleFollowArtist(selectedArtist.name)} className={`px-10 py-4 rounded-xl text-[10px] uppercase font-black transition-all ${followedArtists.find(a => a.name === selectedArtist.name) ? 'bg-cyan-400 text-black shadow-cyan' : 'glass shadow-lg'}`}>{followedArtists.find(a => a.name === selectedArtist.name) ? 'Following' : 'Follow Artist'}</button>
+              </div>
             </div>
           </div>
+
+          <div className="grid md:grid-cols-3 gap-6">
+             <div className="glass p-8 rounded-4xl border border-white/5 flex flex-col items-center justify-center text-center shadow-xl group hover:border-cyan-400/30 transition-all">
+                <span className="text-gray-500 font-black text-[10px] uppercase tracking-[0.3em] mb-4">Community Impact</span>
+                <span className="text-5xl font-mono font-black text-cyan-400 mb-2 group-hover:scale-110 transition-transform">{totalArtistLikes.toLocaleString()}</span>
+                <span className="text-[10px] font-black uppercase text-gray-600 tracking-widest">Aggregate Signal Likes</span>
+             </div>
+             <div className="glass p-8 rounded-4xl border border-white/5 flex flex-col items-center justify-center text-center shadow-xl col-span-2">
+                <p className="text-gray-400 italic font-medium leading-relaxed max-w-lg">
+                  "This metric represents the total organic validation this artist has received from EchoFair community nodes. High numbers indicate a strong independent growth signal."
+                </p>
+             </div>
+          </div>
+
           <div className="grid lg:grid-cols-2 gap-8">
             <div className="glass p-12 rounded-4xl border border-white/5 space-y-8 shadow-2xl">
               <h3 className="text-xs font-black text-gray-500 uppercase tracking-widest">Monthly Economics</h3>
@@ -726,19 +638,12 @@ const App: React.FC = () => {
     <div className="min-h-screen pb-32 selection:bg-cyan-400 selection:text-black">
       <nav className="sticky top-0 z-50 nav-blur px-8 py-6 border-b border-white/5">
         <div className="max-w-7xl mx-auto flex justify-between items-center">
-          <div className="flex items-center gap-5 cursor-pointer group" onClick={() => setCurrentPage(Page.Landing)}>
-            <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center font-black text-black group-hover:rotate-12 transition-transform glow-cyan shadow-xl">EF</div>
-            <span className="text-2xl font-heading font-black tracking-tight">ECHO<span className="text-cyan-400">FAIR</span></span>
-          </div>
+          <div className="flex items-center gap-5 cursor-pointer group" onClick={() => setCurrentPage(Page.Landing)}><div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center font-black text-black group-hover:rotate-12 transition-transform glow-cyan shadow-xl">EF</div><span className="text-2xl font-heading font-black tracking-tight">ECHO<span className="text-cyan-400">FAIR</span></span></div>
           <div className="flex items-center gap-10">
             <button onClick={() => setCurrentPage(Page.Explore)} className={`text-[10px] font-black uppercase tracking-[0.4em] transition-all hover:text-white ${currentPage === Page.Explore ? 'text-cyan-400 underline underline-offset-8' : 'text-gray-500'}`}>Recommended to you</button>
             <button onClick={() => setCurrentPage(Page.Community)} className={`text-[10px] font-black uppercase tracking-[0.4em] transition-all hover:text-white ${currentPage === Page.Community ? 'text-cyan-400 underline underline-offset-8' : 'text-gray-500'}`}>Community</button>
-            {isConnected && (<button onClick={() => setCurrentPage(Page.Dashboard)} className={`text-[10px] font-black uppercase tracking-[0.4em] transition-all hover:text-white ${currentPage === Page.Dashboard ? 'text-cyan-400 underline underline-offset-8' : 'text-gray-500'}`}>Analyser</button>)}
-            {!isConnected ? (
-              <button onClick={handleConnect} className="btn-primary text-[10px] uppercase px-8 py-3 rounded-xl shadow-lg">Link Spotify</button>
-            ) : (
-              <div className="w-10 h-10 rounded-xl bg-indigo-500 flex items-center justify-center text-[10px] font-black cursor-pointer hover:scale-110 transition-all shadow-lg" onClick={() => setCurrentPage(Page.Profile)}>JD</div>
-            )}
+            {isConnected && <button onClick={() => setCurrentPage(Page.Dashboard)} className={`text-[10px] font-black uppercase tracking-[0.4em] transition-all hover:text-white ${currentPage === Page.Dashboard ? 'text-cyan-400 underline underline-offset-8' : 'text-gray-500'}`}>Analyser</button>}
+            {!isConnected ? <button onClick={handleConnect} className="btn-primary text-[10px] uppercase px-8 py-3 rounded-xl shadow-lg">Link Spotify</button> : <div className="w-10 h-10 rounded-xl bg-indigo-500 flex items-center justify-center text-[10px] font-black cursor-pointer hover:scale-110 transition-all shadow-lg" onClick={() => setCurrentPage(Page.Profile)}>JD</div>}
           </div>
         </div>
       </nav>
@@ -753,68 +658,19 @@ const App: React.FC = () => {
         {currentPage === Page.Analyser && (
           <div className="max-w-5xl mx-auto py-32 px-6">
             {isAnalyzing ? (
-              <div className="text-center py-20 space-y-10 animate-in fade-in duration-1000">
-                <div className="w-20 h-20 border-t-2 border-cyan-400 rounded-full animate-spin mx-auto shadow-cyan"></div>
-                <h2 className="text-5xl font-heading font-black tracking-tight">Analysing Fairness...</h2>
-                <p className="text-gray-500 font-medium">Scanning metadata for industrial loop clusters.</p>
-              </div>
+              <div className="text-center py-20 space-y-10 animate-in fade-in duration-1000"><div className="w-20 h-20 border-t-2 border-cyan-400 rounded-full animate-spin mx-auto shadow-cyan"></div><h2 className="text-5xl font-heading font-black tracking-tight">Analysing Fairness...</h2><p className="text-gray-500 font-medium">Scanning metadata for industrial loop clusters.</p></div>
             ) : analysis && (
               <div className="space-y-16 animate-in fade-in duration-500">
-                <div className="flex items-center gap-12">
-                   <div className="w-40 h-40 rounded-3xl overflow-hidden shadow-2xl shrink-0 border border-white/5 bg-black/10">
-                      <PlaylistCover playlist={selectedPlaylist!} />
-                   </div>
-                   <h2 className="text-4xl font-heading font-black tracking-tight">{selectedPlaylist?.name} Fairness Analysis</h2>
-                </div>
-                
+                <div className="flex items-center gap-12"><div className="w-40 h-40 rounded-3xl overflow-hidden shadow-2xl shrink-0 border border-white/5 bg-black/10"><PlaylistCover playlist={selectedPlaylist!} /></div><h2 className="text-4xl font-heading font-black tracking-tight">{selectedPlaylist?.name} Fairness Analysis</h2></div>
                 <div className="glass p-16 rounded-4xl flex flex-col md:flex-row gap-16 items-center border border-white/10 shadow-2xl relative overflow-hidden">
-                    <div className={`absolute -right-20 -bottom-20 w-80 h-80 rounded-full blur-[100px] opacity-20 transition-colors ${
-                      analysis.score < 60 ? 'bg-red-600' : analysis.score < 85 ? 'bg-yellow-500' : 'bg-cyan-400'
-                    }`}></div>
-                    
+                    <div className={`absolute -right-20 -bottom-20 w-80 h-80 rounded-full blur-[100px] opacity-20 transition-colors ${analysis.score < 60 ? 'bg-red-600' : analysis.score < 85 ? 'bg-yellow-500' : 'bg-cyan-400'}`}></div>
                     <div className="w-64 h-64 shrink-0 z-10"><IntegrityChart score={analysis.score} /></div>
-                    <div className="flex-1 z-10">
-                        <div className="flex flex-col mb-6">
-                          <div className="flex items-center gap-6">
-                            <span className={`text-9xl font-black leading-none font-heading ${
-                              analysis.score < 60 ? 'text-red-500' : analysis.score < 85 ? 'text-yellow-400' : 'text-cyan-400'
-                            }`}>{analysis.score}</span>
-                            <div className="flex flex-col">
-                              <div className="text-[10px] font-black uppercase tracking-[0.4em] text-gray-600">Integrity Index</div>
-                              <div className={`text-sm font-black uppercase tracking-widest mt-2 ${
-                                analysis.score < 60 ? 'text-red-500' : analysis.score < 85 ? 'text-yellow-400' : 'text-cyan-400'
-                              }`}>
-                                {analysis.score < 60 ? '⚠ COMPROMISED' : analysis.score < 85 ? '⚠ CAUTION' : '✓ FAIR SIGNAL'}
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                        <p className="text-2xl text-white font-medium leading-relaxed">{analysis.summary}</p>
-                    </div>
+                    <div className="flex-1 z-10"><div className="flex flex-col mb-6"><div className="flex items-center gap-6"><span className={`text-9xl font-black leading-none font-heading ${analysis.score < 60 ? 'text-red-500' : analysis.score < 85 ? 'text-yellow-400' : 'text-cyan-400'}`}>{analysis.score}</span><div className="flex flex-col"><div className="text-[10px] font-black uppercase tracking-[0.4em] text-gray-600">Integrity Index</div><div className={`text-sm font-black uppercase tracking-widest mt-2 ${analysis.score < 60 ? 'text-red-500' : analysis.score < 85 ? 'text-yellow-400' : 'text-cyan-400'}`}>{analysis.score < 60 ? '⚠ COMPROMISED' : analysis.score < 85 ? '⚠ CAUTION' : '✓ FAIR SIGNAL'}</div></div></div></div><p className="text-2xl text-white font-medium leading-relaxed">{analysis.summary}</p></div>
                 </div>
-
                 <div className="grid md:grid-cols-2 gap-6">
                   {analysis.riskFactors.map((risk, i) => (
-                    <div key={i} className={`bg-white/5 p-10 rounded-3xl border shadow-lg relative transition-all hover:bg-white/[0.07] ${
-                      risk.severity === 'High' ? 'border-red-500/30 bg-red-500/[0.02]' : 
-                      risk.severity === 'Medium' ? 'border-yellow-500/30 bg-yellow-500/[0.02]' : 
-                      'border-white/5'
-                    }`}>
-                      <div className="flex justify-between items-start mb-6">
-                        <span className={`text-[10px] font-black uppercase tracking-widest ${
-                          risk.severity === 'High' ? 'text-red-500' : 
-                          risk.severity === 'Medium' ? 'text-yellow-400' : 
-                          'text-cyan-400'
-                        }`}>{risk.category}</span>
-                        
-                        <span className={`text-[10px] font-black uppercase px-3 py-1 rounded-full border ${
-                          risk.severity === 'High' ? 'border-red-500/50 bg-red-500/10 text-red-500' : 
-                          risk.severity === 'Medium' ? 'border-yellow-500/50 bg-yellow-500/10 text-yellow-500' : 
-                          'border-cyan-500/50 bg-cyan-500/10 text-cyan-400'
-                        }`}>
-                          {risk.severity} Risk
-                        </span>
-                      </div>
+                    <div key={i} className={`bg-white/5 p-10 rounded-3xl border shadow-lg relative transition-all hover:bg-white/[0.07] ${risk.severity === 'High' ? 'border-red-500/30 bg-red-500/[0.02]' : risk.severity === 'Medium' ? 'border-yellow-500/30 bg-yellow-500/[0.02]' : 'border-white/5'}`}>
+                      <div className="flex justify-between items-start mb-6"><span className={`text-[10px] font-black uppercase tracking-widest ${risk.severity === 'High' ? 'text-red-500' : risk.severity === 'Medium' ? 'text-yellow-400' : 'text-cyan-400'}`}>{risk.category}</span><span className={`text-[10px] font-black uppercase px-3 py-1 rounded-full border ${risk.severity === 'High' ? 'border-red-500/50 bg-red-500/10 text-red-500' : risk.severity === 'Medium' ? 'border-yellow-500/50 bg-yellow-500/10 text-yellow-500' : 'border-cyan-500/50 bg-cyan-500/10 text-cyan-400'}`}>{risk.severity} Risk</span></div>
                       <p className="text-gray-400 leading-relaxed font-medium">{risk.description}</p>
                     </div>
                   ))}
@@ -828,15 +684,8 @@ const App: React.FC = () => {
       </main>
       <footer className="mt-40 pt-20 pb-20 px-8 border-t border-white/5 bg-black/20">
          <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-10">
-            <div className="flex items-center gap-5">
-              <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center font-black text-black shadow-lg">EF</div>
-              <span className="text-3xl font-heading font-black tracking-tight">ECHOFAIR</span>
-            </div>
-            <div className="flex gap-10">
-               <button onClick={() => setCurrentPage(Page.Explore)} className="text-[10px] font-black uppercase tracking-widest text-gray-500 hover:text-white transition-colors">Recommended</button>
-               <button onClick={() => setCurrentPage(Page.Community)} className="text-[10px] font-black uppercase tracking-widest text-gray-500 hover:text-white transition-colors">Community Network</button>
-               <button onClick={() => setCurrentPage(Page.Profile)} className="text-[10px] font-black uppercase tracking-widest text-gray-500 hover:text-white transition-colors">Fairness Settings</button>
-            </div>
+            <div className="flex items-center gap-5"><div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center font-black text-black shadow-lg">EF</div><span className="text-3xl font-heading font-black tracking-tight">ECHOFAIR</span></div>
+            <div className="flex gap-10"><button onClick={() => setCurrentPage(Page.Explore)} className="text-[10px] font-black uppercase tracking-widest text-gray-500 hover:text-white transition-colors">Recommended</button><button onClick={() => setCurrentPage(Page.Community)} className="text-[10px] font-black uppercase tracking-widest text-gray-500 hover:text-white transition-colors">Community Network</button><button onClick={() => setCurrentPage(Page.Profile)} className="text-[10px] font-black uppercase tracking-widest text-gray-500 hover:text-white transition-colors">Fairness Settings</button></div>
             <div className="text-[10px] font-black text-gray-700 uppercase tracking-widest">&copy; 2025 ECHOFAIR SIGNAL PROTOCOL</div>
          </div>
       </footer>

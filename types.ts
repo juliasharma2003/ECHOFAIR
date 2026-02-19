@@ -28,6 +28,7 @@ export interface Playlist {
   genre: string;
   tracks: Track[];
   integrityScore?: number;
+  votes?: number;
 }
 
 export interface AnalysisResult {
